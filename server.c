@@ -192,6 +192,9 @@ void checkFileType(char *fname, char *ftype) {
     else if (strstr(fname, ".jpg")) {
 		strcpy(ftype, "image/jpeg");
 	}
+    else if (strstr(fname, ".mp4")) {
+		strcpy(ftype, "video/mp4");
+	}
     else {
 		strcpy(ftype, "text/plain");
 	}
@@ -219,7 +222,7 @@ void serveStatic(int fdConnect, FILE *stream, char *fname, int fsize) {
 }
 
 void serveDynamic(int fdConnect, FILE *stream, char *fname, char *cgiArgs) {
-	int pid;
+	pid_t pid;
     char *empList[] = {NULL};
 
 	pid = fork();
