@@ -2,6 +2,8 @@
 	A minimal HTTP/1.1 server for static and dynamic contents
 	* iterative
 	* GET only
+	* MP4 implemented
+	* SIGCHLD implemented
 */
 #include <stdio.h>
 #include <string.h>
@@ -17,11 +19,12 @@
 #include <netdb.h>
 
 #define DEFAULTHOME "index.html"
-#define	MAXSIZE	 8192
+#define	MAXSIZE 8192
 #define MAXLISTEN 5
 
 extern char **environ;
 
+void waitChild(int signo);
 int openFd(char *port);
 void serveContent(int fdConnect, FILE *stream);
 int analyzeRequest(char *uri, char *fname, char *cgiArgs);
@@ -30,8 +33,7 @@ void serveStatic(int fdConnect, FILE *stream, char *fname, int fsize);
 void serveDynamic(int fdConnect, FILE *stream, char *fname, char *cgiArgs);
 void serveError(FILE *stream, char *cause, char *errNum, char *shortMsg, char *longMsg);
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
 	int fdListen, fdConnect;
 	char hostname[MAXSIZE], port[MAXSIZE];
 	socklen_t clientLen;
@@ -56,6 +58,13 @@ int main(int argc, char *argv[])
 	}
 	
 	return 0;
+}
+
+void waitChild(int signo) {  
+    int status;
+    while (waitpid(-1, &status, WNOHANG) > 0) {
+		;
+    }		
 }
 
 int openFd(char *port) {
@@ -103,8 +112,7 @@ int openFd(char *port) {
     return fd;
 }
 
-void serveContent(int fdConnect, FILE *stream)
-{
+void serveContent(int fdConnect, FILE *stream) {
 	/* content type */
     int contentType;
 	/* metadata of requested file */
@@ -203,37 +211,43 @@ void checkFileType(char *fname, char *ftype) {
 void serveStatic(int fdConnect, FILE *stream, char *fname, int fsize) {
     int ffd;
     char *fp, ftype[100], buf[MAXSIZE];
+	pid_t pid;
 
-    /* check file type */
-    checkFileType(fname, ftype);
-	/* send Response Headers */
-	fprintf(stream, "HTTP/1.1 200 OK\n");
-	fprintf(stream, "Server: Minimal HTTP Server\n");
-	fprintf(stream, "Content-type: %s\n", ftype);
-	fprintf(stream, "Content-length: %d\n\r\n", fsize);
-	fflush(stream);
+	signal(SIGCHLD, waitChild);
+	pid = fork();
+	if (pid < 0) {
+		perror("Failed to fork");
+	}
+    else if (pid == 0) {
+		/* check file type */
+		checkFileType(fname, ftype);
 
-    /* send Response Body */
-    ffd = open(fname, O_RDONLY, 0);
-    fp = mmap(0, fsize, PROT_READ, MAP_PRIVATE, ffd, 0);
-    close(ffd);
-    write(fdConnect, fp, fsize);
-    munmap(fp, fsize);
+		/* send Response Headers */
+		fprintf(stream, "HTTP/1.1 200 OK\n");
+		fprintf(stream, "Server: Minimal HTTP Server\n");
+		fprintf(stream, "Content-type: %s\n", ftype);
+		fprintf(stream, "Content-length: %d\n\r\n", fsize);
+		fflush(stream);
+
+		/* send Response Body */
+		ffd = open(fname, O_RDONLY, 0);
+		fp = mmap(0, fsize, PROT_READ, MAP_PRIVATE, ffd, 0);
+		close(ffd);
+		write(fdConnect, fp, fsize);
+		munmap(fp, fsize);
+	}
 }
 
 void serveDynamic(int fdConnect, FILE *stream, char *fname, char *cgiArgs) {
 	pid_t pid;
     char *empList[] = {NULL};
 
+	signal(SIGCHLD, waitChild);
 	pid = fork();
 	if (pid < 0) {
 		perror("Failed to fork");
 	}
-	/* parent waits for and reaps child */
-    else if (pid > 0) {
-		wait(NULL);
-	}
-    else {
+    else if (pid == 0) {
 		/* send Response Headers */
 		fprintf(stream, "HTTP/1.1 200 OK\n");
 		fprintf(stream, "Server: Minimal HTTP Server\n\r\n");
@@ -248,8 +262,7 @@ void serveDynamic(int fdConnect, FILE *stream, char *fname, char *cgiArgs) {
     }
 }
 
-void serveError(FILE *stream, char *cause, char *errNum, char *shortMsg, char *longMsg)
-{
+void serveError(FILE *stream, char *cause, char *errNum, char *shortMsg, char *longMsg) {
 	/* send Response Headers */
     fprintf(stream, "HTTP/1.1 %s %s\n", errNum, shortMsg);
 	fprintf(stream, "Server: Minimal HTTP Server\n");
