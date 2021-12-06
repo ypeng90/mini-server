@@ -1,0 +1,10 @@
+#!/usr/bin/env python
+import cgi 
+
+# Create instance of FieldStorage 
+form = cgi.FieldStorage()
+
+# Get data from fields
+x = form.getvalue('x')
+y = form.getvalue('y')
+print(int(x) + int(y))

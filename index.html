@@ -5,13 +5,29 @@
     <title>My test page</title>
   </head>
   <body>
-    <h1>Test for GIF</h1>
+    <h2>Test for GIF</h2>
 	<img src="http://192.168.1.195:8080/a.gif" width="400">
-    <h1>Test for PNG</h1>
+    <h2>Test for PNG</h2>
 	<img src="http://192.168.1.195:8080/b.png" width="400">
-    <h1>Test for JPG</h1>
+    <h2>Test for JPG</h2>
 	<img src="http://192.168.1.195:8080/c.jpg" width="400">
-    <h1>Test for MP4</h1>
+    <h2>Test for MP4</h2>
 	<video controls width="400"><source src="http://192.168.1.195:8080/d.mp4" type="video/mp4"></video>
+	<h2>Test for CGI Adder with GET</h2>
+	<form action="/cgi-bin/adder" method="get" target="_blank">
+		<label for="x">x:</label>
+		<input type="number" id="x" name="x" step="1"><br><br>
+		<label for="y">y:</label>
+		<input type="number" id="y" name="y" step="1"><br><br>
+		<input type="submit" value="Submit">
+	</form>
+	<h2>Test for CGI Adder with POST</h2>
+	<form action="/cgi-bin/adder" method="post" target="_blank">
+		<label for="x">x:</label>
+		<input type="number" id="x" name="x" step="1"><br><br>
+		<label for="y">y:</label>
+		<input type="number" id="y" name="y" step="1"><br><br>
+		<input type="submit" value="Submit">
+	</form>
   </body>
 </html>

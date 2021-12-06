@@ -1,9 +1,10 @@
 /*
-	A minimal HTTP/1.1 server for static and dynamic contents
+	A minimal HTTP/1.1 server based on Tiny
+	http://csapp.cs.cmu.edu/3e/ics3/code/netp/tiny/tiny.c
 	* iterative
-	* GET only
-	* MP4 implemented
-	* SIGCHLD implemented
+	* supported methods: GET, HEAD, POST
+	* supported static file types: html, gif, png, jpg, mp4, plain text
+	* SIGCHLD implemented: https://www.cnblogs.com/wuchanming/p/4020463.html
 */
 #include <stdio.h>
 #include <string.h>
@@ -29,16 +30,16 @@ int openFd(char *port);
 void serveContent(int fdConnect, FILE *stream);
 int analyzeRequest(char *uri, char *fname, char *cgiArgs);
 void checkFileType(char *fname, char *ftype);
-void serveStatic(int fdConnect, FILE *stream, char *fname, int fsize);
-void serveDynamic(int fdConnect, FILE *stream, char *fname, char *cgiArgs);
-void serveError(FILE *stream, char *cause, char *errNum, char *shortMsg, char *longMsg);
+void serveError(char *method, FILE *stream, char *cause, char *errNum, char *shortMsg, char *longMsg);
+void serveStatic(char *method, int fdConnect, FILE *stream, char *fname, int fsize);
+void serveDynamic(char *method, int fdConnect, FILE *stream, char *fname, char *cgiArgs);
 
 int main(int argc, char *argv[]) {
 	int fdListen, fdConnect;
 	char hostname[MAXSIZE], port[MAXSIZE];
 	socklen_t clientLen;
 	struct sockaddr_storage clientaddr;
-	FILE *stream;                                     // fdConnect as stream
+	FILE *stream;
 
 	if (argc != 2) {
 		printf("Usage: %s <port>\n", argv[0]);
@@ -51,6 +52,7 @@ int main(int argc, char *argv[]) {
 		fdConnect = accept(fdListen, (struct sockaddr *)&clientaddr, &clientLen);
 		getnameinfo((struct sockaddr *)&clientaddr, clientLen, hostname, MAXSIZE, port, MAXSIZE, 0);
 		printf("Connected %s: %s\n", hostname, port);
+		/* fdConnect as stream */
 		stream = fdopen(fdConnect, "r+");
 		serveContent(fdConnect, stream);
 		fclose(stream);
@@ -113,51 +115,76 @@ int openFd(char *port) {
 }
 
 void serveContent(int fdConnect, FILE *stream) {
-	/* content type */
     int contentType;
-	/* metadata of requested file */
-    struct stat meta;
+    struct stat meta;                                      // metadata of requested file
     char buf[MAXSIZE], method[MAXSIZE], uri[MAXSIZE], version[MAXSIZE];
     char fname[MAXSIZE], cgiArgs[MAXSIZE];
+	int payloadSize = -1;
+	pid_t pid;
 
-    /* extract Request Line and ignore Request Headers */
-    fgets(buf, MAXSIZE, stream);
-    printf("%s", buf);
-    sscanf(buf, "%s %s %s", method, uri, version);
-    while (strcmp(buf, "\r\n")) {
-        fgets(buf, MAXSIZE, stream);
-        // printf("%s", buf);
-    }
+	signal(SIGCHLD, waitChild);
+	pid = fork();
+	if (pid < 0) {
+		perror("Failed to fork");
+	}
+    else if (pid == 0) {
+		/* extract Request-Line and ignore Request Headers */
+		fgets(buf, MAXSIZE, stream);                       // read up to MAXSIZE-1 bytes, terminate with '\0'
+		printf("%s", buf);
+		sscanf(buf, "%s %s %s", method, uri, version);
+		// printf("%s\n", method);
+		while (strcmp(buf, "\r\n")) {
+			fgets(buf, MAXSIZE, stream);
+			// printf("%s", buf);
+			/* get payloadSize for POST */
+			if (!strcmp(method, "POST")) {
+				buf[15] = '\0';                            // check up to first 15 chars
+				if (strcasecmp(buf, "Content-Length:") == 0) {
+					payloadSize = atoi(&(buf[16]));
+				}
+			}
+		}
 
-	/* disallowed Method */
-    if (strcasecmp(method, "GET") != 0) {
-        serveError(stream, method, "501", "Not Implemented", "Not Implemented");
-        return;
-    }
-
-    /* analyze URI for content type, file name, and cgi arguments if any */
-    contentType = analyzeRequest(uri, fname, cgiArgs);
-    if (stat(fname, &meta) < 0) {
-		serveError(stream, fname, "404", "Not found", "Not found");
-		return;
-    }
-
-    /* static content */
-	if (contentType == 0) {
-		if (!S_ISREG(meta.st_mode) || !(meta.st_mode & S_IRUSR)) {
-			serveError(stream, fname, "403", "Forbidden", "Forbidden");
+		/* unsupported Method */
+		if (strcmp(method, "GET") && strcmp(method, "HEAD") && strcmp(method, "POST")) {
+			serveError(method, stream, method, "501", "Not Implemented", "Not Implemented");
+			printf("Not Implemented: %s\n", method);
 			return;
 		}
-		serveStatic(fdConnect, stream, fname, meta.st_size);
-    }
-	/* dynamic content */
-    else if (contentType == 1) {
-		if (!S_ISREG(meta.st_mode) || !(meta.st_mode & S_IXUSR)) {
-			serveError(stream, fname, "403", "Forbidden", "Forbidden");
+
+		/* analyze URI for content type, file name, and cgi arguments if any */
+		contentType = analyzeRequest(uri, fname, cgiArgs);
+		if (stat(fname, &meta) < 0) {
+			serveError(method, stream, fname, "404", "Not found", "Not found");
 			return;
 		}
-		serveDynamic(fdConnect, stream, fname, cgiArgs);
-    }
+
+		/* not regular file, not readable for static, not executable for dynamic */
+		if (!S_ISREG(meta.st_mode) || (!(meta.st_mode & S_IRUSR) && contentType == 0) 
+			|| (!(meta.st_mode & S_IXUSR) && contentType == 1)) {
+			serveError(method, stream, fname, "403", "Forbidden", "Forbidden");
+			return;
+		}
+
+		/* static content */
+		if (contentType == 0) {
+			serveStatic(method, fdConnect, stream, fname, meta.st_size);
+		}
+		/* dynamic content */
+		else if (contentType == 1) {
+			/* extract payload for POST */
+			if (!strcmp(method, "POST")) {
+				/* POST request without Content-Length */
+				if (payloadSize == -1) {
+					serveError(method, stream, method, "411", "Length Required", "Length Required");
+					return;
+				}
+				fgets(cgiArgs, payloadSize + 1, stream);
+				printf("%s\n", cgiArgs);
+			}
+			serveDynamic(method, fdConnect, stream, fname, cgiArgs);
+		}
+	}
 }
 
 int analyzeRequest(char *uri, char *fname, char *cgiArgs) {
@@ -180,8 +207,8 @@ int analyzeRequest(char *uri, char *fname, char *cgiArgs) {
 
 	strcpy(fname, ".");                               // initiate fname
 	strcat(fname, uri);                               // uri is original or fragmented
-	/* add DEFAULTHOME to file name if not specified in uri */
-	if (contentType == 0 && uri[strlen(uri) - 1] == '/') {
+	/* add DEFAULTHOME to file name if not specified in uri for static content */
+	if (contentType == 0 && strcmp(uri, "/") == 0) {
 		strcat(fname, DEFAULTHOME);
 	}
 	return contentType;
@@ -208,68 +235,64 @@ void checkFileType(char *fname, char *ftype) {
 	}
 }
 
-void serveStatic(int fdConnect, FILE *stream, char *fname, int fsize) {
-    int ffd;
-    char *fp, ftype[100], buf[MAXSIZE];
-	pid_t pid;
-
-	signal(SIGCHLD, waitChild);
-	pid = fork();
-	if (pid < 0) {
-		perror("Failed to fork");
-	}
-    else if (pid == 0) {
-		/* check file type */
-		checkFileType(fname, ftype);
-
-		/* send Response Headers */
-		fprintf(stream, "HTTP/1.1 200 OK\n");
-		fprintf(stream, "Server: Minimal HTTP Server\n");
-		fprintf(stream, "Content-type: %s\n", ftype);
-		fprintf(stream, "Content-length: %d\n\r\n", fsize);
-		fflush(stream);
-
-		/* send Response Body */
-		ffd = open(fname, O_RDONLY, 0);
-		fp = mmap(0, fsize, PROT_READ, MAP_PRIVATE, ffd, 0);
-		close(ffd);
-		write(fdConnect, fp, fsize);
-		munmap(fp, fsize);
-	}
-}
-
-void serveDynamic(int fdConnect, FILE *stream, char *fname, char *cgiArgs) {
-	pid_t pid;
-    char *empList[] = {NULL};
-
-	signal(SIGCHLD, waitChild);
-	pid = fork();
-	if (pid < 0) {
-		perror("Failed to fork");
-	}
-    else if (pid == 0) {
-		/* send Response Headers */
-		fprintf(stream, "HTTP/1.1 200 OK\n");
-		fprintf(stream, "Server: Minimal HTTP Server\n\r\n");
-		fflush(stream);
-
-		/* send Response Body */
-		setenv("QUERY_STRING", cgiArgs, 1);
-		dup2(fdConnect, STDOUT_FILENO);
-		if (execve(fname, empList, environ) < 0) {
-			perror("Failed to execve");
-		}
-    }
-}
-
-void serveError(FILE *stream, char *cause, char *errNum, char *shortMsg, char *longMsg) {
+void serveError(char *method, FILE *stream, char *cause, char *errNum, char *shortMsg, char *longMsg) {
 	/* send Response Headers */
     fprintf(stream, "HTTP/1.1 %s %s\n", errNum, shortMsg);
 	fprintf(stream, "Server: Minimal HTTP Server\n");
     fprintf(stream, "Content-type: text/html\n\r\n");
 
-    /* send Response Body */
+    if (strcmp(method, "HEAD") == 0) {
+		return;
+	}
+
+	/* send Response Body */
     fprintf(stream, "<html>\n<head><title>Web Server Error</title></head>\n");
     fprintf(stream, "<body>\n<h1>%s: %s</h1>\n", errNum, shortMsg);
     fprintf(stream, "<p>%s: %s</p>\n</body>\n</html>\n", longMsg, cause);
+}
+
+void serveStatic(char *method, int fdConnect, FILE *stream, char *fname, int fsize) {
+    int ffd;
+    char *fp, ftype[100], buf[MAXSIZE];
+
+	/* check file type */
+	checkFileType(fname, ftype);
+
+	/* send Response Headers */
+	fprintf(stream, "HTTP/1.1 200 OK\n");
+	fprintf(stream, "Server: Minimal HTTP Server\n");
+	fprintf(stream, "Content-type: %s\n", ftype);
+	fprintf(stream, "Content-length: %d\n\r\n", fsize);
+
+	if (strcmp(method, "HEAD") == 0) {
+		return;
+	}
+
+	/* send Response Body */
+	fflush(stream);
+	ffd = open(fname, O_RDONLY, 0);
+	fp = mmap(0, fsize, PROT_READ, MAP_PRIVATE, ffd, 0);
+	close(ffd);
+	write(fdConnect, fp, fsize);
+	munmap(fp, fsize);
+}
+
+void serveDynamic(char *method, int fdConnect, FILE *stream, char *fname, char *cgiArgs) {
+    char *empList[] = {NULL};
+
+	/* send Response Headers */
+	fprintf(stream, "HTTP/1.1 200 OK\n");
+	fprintf(stream, "Server: Minimal HTTP Server\n\r\n");
+
+	if (strcmp(method, "HEAD") == 0) {
+		return;
+	}
+
+	/* send Response Body */
+	fflush(stream);
+	setenv("QUERY_STRING", cgiArgs, 1);
+	dup2(fdConnect, STDOUT_FILENO);
+	if (execve(fname, empList, environ) < 0) {
+		perror("Failed to execve");
+	}
 }
