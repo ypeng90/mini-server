@@ -1,10 +1,11 @@
 /*
-	A minimal HTTP/1.1 server based on Tiny
+	A minimal HTTP/1.1 server based on Tiny for learning purpose
 	http://csapp.cs.cmu.edu/3e/ics3/code/netp/tiny/tiny.c
 	* iterative
-	* supported methods: GET, HEAD, POST
+	* implemented methods: GET, HEAD, POST
 	* supported static file types: html, gif, png, jpg, mp4, plain text
 	* SIGCHLD implemented: https://www.cnblogs.com/wuchanming/p/4020463.html
+	* arguments parsing implemented for dynamic content using GET and POST
 */
 #include <stdio.h>
 #include <string.h>
@@ -24,7 +25,6 @@
 #define MAXLISTEN 5
 
 extern char **environ;
-
 void waitChild(int signo);
 int openFd(char *port);
 void serveContent(int fdConnect, FILE *stream);
@@ -37,23 +37,33 @@ void serveDynamic(char *method, int fdConnect, FILE *stream, char *fname, char *
 int main(int argc, char *argv[]) {
 	int fdListen, fdConnect;
 	char hostname[MAXSIZE], port[MAXSIZE];
-	socklen_t clientLen;
 	struct sockaddr_storage clientaddr;
+	socklen_t clientLen;
 	FILE *stream;
 
 	if (argc != 2) {
 		printf("Usage: %s <port>\n", argv[0]);
 		return 0;
 	}
-	
-	fdListen = openFd(argv[1]);
+	/* open a listening socket on port */
+	if ((fdListen = openFd(argv[1])) < 0) {
+		printf("Failed to open a listening socket on port %s\n", argv[1]);
+		return 1;
+	}
 	clientLen = sizeof(clientaddr);
 	while (1) {
-		fdConnect = accept(fdListen, (struct sockaddr *)&clientaddr, &clientLen);
+		if ((fdConnect = accept(fdListen, (struct sockaddr *)&clientaddr, &clientLen)) < 0) {
+			perror("accept");
+			return 1;
+		}
+		/* get information of connected client */
 		getnameinfo((struct sockaddr *)&clientaddr, clientLen, hostname, MAXSIZE, port, MAXSIZE, 0);
 		printf("Connected %s: %s\n", hostname, port);
-		/* fdConnect as stream */
-		stream = fdopen(fdConnect, "r+");
+		/* associate a stream with fdConnect for read and write */
+		if (!(stream = fdopen(fdConnect, "r+"))) {
+			perror("fdopen");
+			return 1;
+		}
 		serveContent(fdConnect, stream);
 		fclose(stream);
 		close(fdConnect);
@@ -65,49 +75,49 @@ int main(int argc, char *argv[]) {
 void waitChild(int signo) {  
     int status;
     while (waitpid(-1, &status, WNOHANG) > 0) {
-		;
+		continue;
     }		
 }
 
 int openFd(char *port) {
     struct addrinfo hints, * listp, * p;
     int fd, rc, optval = 1;
-
     /* get a list of potential server addresses */
     memset(&hints, 0, sizeof(struct addrinfo));
-    hints.ai_socktype = SOCK_STREAM;                  // accept connection
+    hints.ai_socktype = SOCK_STREAM;                  // two-way connection-based byte-streams
     hints.ai_flags = AI_PASSIVE | AI_ADDRCONFIG;      // any IP address
     hints.ai_flags |= AI_NUMERICSERV;                 // port as number
-    if ((rc = getaddrinfo(NULL, port, &hints, &listp)) != 0) {
-        printf("getaddrinfo failed on (port %s): %s\n", port, gai_strerror(rc));
+    if (rc = getaddrinfo(NULL, port, &hints, &listp)) {
+        fprintf(stderr, "getaddrinfo (port %s): %s\n", port, gai_strerror(rc));
         return -2;
     }
-
     /* iterate list for a bindable fd */
     for (p = listp; p; p = p->ai_next) {
         /* creating descriptor failed, check next */
         if ((fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) < 0) {
             continue;
 		}
-        /* eliminate "Address already in use" error from bind */
+        /* allow to reuse even in TIME_WAIT state */
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const void *)&optval , sizeof(int));
         /* bind descriptor to address */
-        if (bind(fd, p->ai_addr, p->ai_addrlen) == 0) {
+        if (!bind(fd, p->ai_addr, p->ai_addrlen)) {
             break;
 		}
+		/* close descriptor if failed to bind */
         if (close(fd) < 0) {
-            printf("openFd failed to close: %s\n", strerror(errno));
+            perror("openFd iterate close");
             return -1;
         }
     }
-
+    /* clean up */
     freeaddrinfo(listp);
-	/* no address worked */
+	/* none worked */
     if (!p) {
         return -1;
 	}
     /* listen to accept connection requests, allowing MAXLISTEN requests to queue */
     if (listen(fd, MAXLISTEN) < 0) {
+		perror("openFd listen");
         close(fd);
 	    return -1;
     }
@@ -128,44 +138,39 @@ void serveContent(int fdConnect, FILE *stream) {
 		perror("Failed to fork");
 	}
     else if (pid == 0) {
-		/* extract Request-Line and ignore Request Headers */
+		/* extract Request-Line and Request Headers */
 		fgets(buf, MAXSIZE, stream);                       // read up to MAXSIZE-1 bytes, terminate with '\0'
 		printf("%s", buf);
 		sscanf(buf, "%s %s %s", method, uri, version);
-		// printf("%s\n", method);
 		while (strcmp(buf, "\r\n")) {
 			fgets(buf, MAXSIZE, stream);
 			// printf("%s", buf);
 			/* get payloadSize for POST */
 			if (!strcmp(method, "POST")) {
 				buf[15] = '\0';                            // check up to first 15 chars
-				if (strcasecmp(buf, "Content-Length:") == 0) {
+				if (!strcasecmp(buf, "Content-Length:")) {
 					payloadSize = atoi(&(buf[16]));
 				}
 			}
 		}
-
 		/* unsupported Method */
 		if (strcmp(method, "GET") && strcmp(method, "HEAD") && strcmp(method, "POST")) {
 			serveError(method, stream, method, "501", "Not Implemented", "Not Implemented");
 			printf("Not Implemented: %s\n", method);
 			return;
 		}
-
 		/* analyze URI for content type, file name, and cgi arguments if any */
 		contentType = analyzeRequest(uri, fname, cgiArgs);
 		if (stat(fname, &meta) < 0) {
 			serveError(method, stream, fname, "404", "Not found", "Not found");
 			return;
 		}
-
 		/* not regular file, not readable for static, not executable for dynamic */
 		if (!S_ISREG(meta.st_mode) || (!(meta.st_mode & S_IRUSR) && contentType == 0) 
 			|| (!(meta.st_mode & S_IXUSR) && contentType == 1)) {
 			serveError(method, stream, fname, "403", "Forbidden", "Forbidden");
 			return;
 		}
-
 		/* static content */
 		if (contentType == 0) {
 			serveStatic(method, fdConnect, stream, fname, meta.st_size);
@@ -208,7 +213,7 @@ int analyzeRequest(char *uri, char *fname, char *cgiArgs) {
 	strcpy(fname, ".");                               // initiate fname
 	strcat(fname, uri);                               // uri is original or fragmented
 	/* add DEFAULTHOME to file name if not specified in uri for static content */
-	if (contentType == 0 && strcmp(uri, "/") == 0) {
+	if (contentType == 0 && !strcmp(uri, "/")) {
 		strcat(fname, DEFAULTHOME);
 	}
 	return contentType;
@@ -241,7 +246,7 @@ void serveError(char *method, FILE *stream, char *cause, char *errNum, char *sho
 	fprintf(stream, "Server: Minimal HTTP Server\n");
     fprintf(stream, "Content-type: text/html\n\r\n");
 
-    if (strcmp(method, "HEAD") == 0) {
+    if (!strcmp(method, "HEAD")) {
 		return;
 	}
 
@@ -257,14 +262,13 @@ void serveStatic(char *method, int fdConnect, FILE *stream, char *fname, int fsi
 
 	/* check file type */
 	checkFileType(fname, ftype);
-
 	/* send Response Headers */
 	fprintf(stream, "HTTP/1.1 200 OK\n");
 	fprintf(stream, "Server: Minimal HTTP Server\n");
 	fprintf(stream, "Content-type: %s\n", ftype);
 	fprintf(stream, "Content-length: %d\n\r\n", fsize);
 
-	if (strcmp(method, "HEAD") == 0) {
+	if (!strcmp(method, "HEAD")) {
 		return;
 	}
 
@@ -284,7 +288,7 @@ void serveDynamic(char *method, int fdConnect, FILE *stream, char *fname, char *
 	fprintf(stream, "HTTP/1.1 200 OK\n");
 	fprintf(stream, "Server: Minimal HTTP Server\n\r\n");
 
-	if (strcmp(method, "HEAD") == 0) {
+	if (!strcmp(method, "HEAD")) {
 		return;
 	}
 
@@ -293,6 +297,6 @@ void serveDynamic(char *method, int fdConnect, FILE *stream, char *fname, char *
 	setenv("QUERY_STRING", cgiArgs, 1);
 	dup2(fdConnect, STDOUT_FILENO);
 	if (execve(fname, empList, environ) < 0) {
-		perror("Failed to execve");
+		perror("execve");
 	}
 }
