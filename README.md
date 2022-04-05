@@ -1,11 +1,11 @@
 # Minimal HTTP Server
 
-## Main Featuress
+## Main Features
 
-- Implemented methods: `GET`, `HEAD`, `POST`
-- Supported static file types: `html`, `gif`, `png`, `jpg`, `mp4`, `plain text`
 - Concurrency supported
-- Arguments parsing implemented for dynamic contents using `GET` and `POST` methods
+- Methods implemented: `GET`, `HEAD`, `POST`
+- Static contents supported: `html`, `gif`, `png`, `jpg`, `mp4`, `plain text`
+- Dynamic contents supported: `CGI`
 
 ## References
 
