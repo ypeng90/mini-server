@@ -1,4 +1,4 @@
-# A Minimal HTTP/1.1 Server For Learning Purpose
+# A Minimal HTTP Server For Learning Purpose
 
 ## Main Featuress
 
@@ -6,6 +6,12 @@
 - Supported static file types: `html`, `gif`, `png`, `jpg`, `mp4`, `plain text`
 - Concurrency supported
 - Arguments parsing implemented for dynamic contents using `GET` and `POST` methods
+
+## Compile
+
+```bash
+gcc mini_server.c -o mini_server
+```
 
 ## References
 
